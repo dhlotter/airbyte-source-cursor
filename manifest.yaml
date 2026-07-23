@@ -1,0 +1,421 @@
+# Airbyte declarative source for the Cursor Teams (Admin) API.
+# Authored from Cursor's public docs: https://cursor.com/docs/account/teams/admin-api
+#
+# Cursor only exposes a rolling window of usage and spend data. This connector's
+# job is to snapshot that window into permanent warehouse storage on every sync.
+# History accrues forward from the day the connection is installed.
+
+version: 6.44.0
+type: DeclarativeSource
+
+check:
+  type: CheckStream
+  stream_names:
+    - members
+
+# The Cursor Admin API is rate limited (20 to 60 req/min per team depending on
+# endpoint), so streams run one at a time.
+concurrency_level:
+  type: ConcurrencyLevel
+  default_concurrency: 1
+
+definitions:
+  authenticator:
+    type: BasicHttpAuthenticator
+    username: "{{ config['api_key'] }}"
+    password: ""
+
+  requester:
+    type: HttpRequester
+    url_base: https://api.cursor.com
+    authenticator:
+      $ref: "#/definitions/authenticator"
+    error_handler:
+      type: DefaultErrorHandler
+      max_retries: 5
+      backoff_strategies:
+        - type: ExponentialBackoffStrategy
+          factor: 5
+      response_filters:
+        - type: HttpResponseFilter
+          action: RETRY
+          http_codes: [429, 500, 502, 503, 504]
+
+streams:
+  # ---------------------------------------------------------------------------
+  # members: GET /teams/members, full refresh
+  # ---------------------------------------------------------------------------
+  - type: DeclarativeStream
+    name: members
+    primary_key:
+      - email
+    retriever:
+      type: SimpleRetriever
+      requester:
+        $ref: "#/definitions/requester"
+        path: /teams/members
+        http_method: GET
+      record_selector:
+        type: RecordSelector
+        extractor:
+          type: DpathExtractor
+          field_path:
+            - teamMembers
+    schema_loader:
+      type: InlineSchemaLoader
+      schema:
+        $schema: http://json-schema.org/draft-07/schema#
+        type: object
+        additionalProperties: true
+        properties:
+          id:
+            type: ["string", "null"]
+          userId:
+            type: ["string", "null"]
+          name:
+            type: ["string", "null"]
+          email:
+            type: string
+          role:
+            type: ["string", "null"]
+          isRemoved:
+            type: ["boolean", "null"]
+
+  # ---------------------------------------------------------------------------
+  # daily_usage: POST /teams/daily-usage-data, incremental on `date` (epoch ms)
+  # API caps each request at a 30 day range, hence step P30D.
+  # 2 day lookback because Cursor aggregates hourly and backfills late data.
+  # ---------------------------------------------------------------------------
+  - type: DeclarativeStream
+    name: daily_usage
+    primary_key:
+      - date
+      - email
+    retriever:
+      type: SimpleRetriever
+      requester:
+        $ref: "#/definitions/requester"
+        path: /teams/daily-usage-data
+        http_method: POST
+        request_body_json:
+          startDate: "{{ stream_interval.start_time | int }}"
+          endDate: "{{ stream_interval.end_time | int }}"
+      record_selector:
+        type: RecordSelector
+        extractor:
+          type: DpathExtractor
+          field_path:
+            - data
+    incremental_sync:
+      type: DatetimeBasedCursor
+      cursor_field: date
+      cursor_datetime_formats:
+        - "%ms"
+      datetime_format: "%ms"
+      start_datetime:
+        type: MinMaxDatetime
+        datetime: "{{ config['start_date'] }}"
+        datetime_format: "%Y-%m-%d"
+      end_datetime:
+        type: MinMaxDatetime
+        datetime: "{{ now_utc().strftime('%Y-%m-%dT%H:%M:%S.%fZ') }}"
+        datetime_format: "%Y-%m-%dT%H:%M:%S.%fZ"
+      step: P30D
+      cursor_granularity: PT0.001S
+      lookback_window: P2D
+    schema_loader:
+      type: InlineSchemaLoader
+      schema:
+        $schema: http://json-schema.org/draft-07/schema#
+        type: object
+        additionalProperties: true
+        properties:
+          date:
+            type: integer
+          day:
+            type: ["string", "null"]
+          userId:
+            type: ["string", "null"]
+          email:
+            type: string
+          isActive:
+            type: ["boolean", "null"]
+          totalLinesAdded:
+            type: ["integer", "null"]
+          totalLinesDeleted:
+            type: ["integer", "null"]
+          acceptedLinesAdded:
+            type: ["integer", "null"]
+          acceptedLinesDeleted:
+            type: ["integer", "null"]
+          totalApplies:
+            type: ["integer", "null"]
+          totalAccepts:
+            type: ["integer", "null"]
+          totalRejects:
+            type: ["integer", "null"]
+          totalTabsShown:
+            type: ["integer", "null"]
+          totalTabsAccepted:
+            type: ["integer", "null"]
+          chatRequests:
+            type: ["integer", "null"]
+          composerRequests:
+            type: ["integer", "null"]
+          agentRequests:
+            type: ["integer", "null"]
+          cmdkUsages:
+            type: ["integer", "null"]
+          bugbotUsages:
+            type: ["integer", "null"]
+          subscriptionIncludedReqs:
+            type: ["integer", "null"]
+          usageBasedReqs:
+            type: ["integer", "null"]
+          apiKeyReqs:
+            type: ["integer", "null"]
+          mostUsedModel:
+            type: ["string", "null"]
+          applyMostUsedExtension:
+            type: ["string", "null"]
+          tabMostUsedExtension:
+            type: ["string", "null"]
+          clientVersion:
+            type: ["string", "null"]
+
+  # ---------------------------------------------------------------------------
+  # spend: POST /teams/spend, full refresh, paginated (response has totalPages).
+  # Snapshot of the CURRENT billing cycle. Sync in append mode to keep history.
+  # ---------------------------------------------------------------------------
+  - type: DeclarativeStream
+    name: spend
+    primary_key:
+      - email
+    retriever:
+      type: SimpleRetriever
+      requester:
+        $ref: "#/definitions/requester"
+        path: /teams/spend
+        http_method: POST
+        request_body_json:
+          searchTerm: ""
+      record_selector:
+        type: RecordSelector
+        extractor:
+          type: DpathExtractor
+          field_path:
+            - teamMemberSpend
+      paginator:
+        type: DefaultPaginator
+        pagination_strategy:
+          type: PageIncrement
+          page_size: 100
+          start_from_page: 1
+          inject_on_first_request: true
+        page_token_option:
+          type: RequestOption
+          field_name: page
+          inject_into: body_json
+        page_size_option:
+          type: RequestOption
+          field_name: pageSize
+          inject_into: body_json
+    schema_loader:
+      type: InlineSchemaLoader
+      schema:
+        $schema: http://json-schema.org/draft-07/schema#
+        type: object
+        additionalProperties: true
+        properties:
+          userId:
+            type: ["string", "null"]
+          email:
+            type: string
+          name:
+            type: ["string", "null"]
+          role:
+            type: ["string", "null"]
+          # CRITICAL: number, not integer. Cursor returns fractional cents
+          # (e.g. 9445.474115). An integer type silently nulls the value.
+          spendCents:
+            type: ["number", "null"]
+          # CRITICAL: number, not integer. Fractional cents, same as spendCents.
+          includedSpendCents:
+            type: ["number", "null"]
+          autoPercentUsed:
+            type: ["number", "null"]
+          apiPercentUsed:
+            type: ["number", "null"]
+          totalPercentUsed:
+            type: ["number", "null"]
+          fastPremiumRequests:
+            type: ["integer", "null"]
+          hardLimitOverrideDollars:
+            type: ["integer", "null"]
+          effectivePerUserLimitDollars:
+            type: ["integer", "null"]
+          monthlyLimitDollars:
+            type: ["integer", "null"]
+          billingTier:
+            type: ["string", "null"]
+          removedAt:
+            type: ["string", "null"]
+          profilePictureUrl:
+            type: ["string", "null"]
+          usagePromoExpiresAt:
+            type: ["string", "null"]
+
+  # ---------------------------------------------------------------------------
+  # usage_events: POST /teams/filtered-usage-events, incremental on `timestamp`
+  # (epoch ms as string), paginated (response pagination.hasNextPage).
+  # 1 day lookback: events are aggregated hourly and can land late; without it
+  # a cursor sitting at "now" silently loses those events forever.
+  # ---------------------------------------------------------------------------
+  - type: DeclarativeStream
+    name: usage_events
+    primary_key:
+      - timestamp
+      - userEmail
+      - model
+    retriever:
+      type: SimpleRetriever
+      requester:
+        $ref: "#/definitions/requester"
+        path: /teams/filtered-usage-events
+        http_method: POST
+        request_body_json:
+          startDate: "{{ stream_interval.start_time | int }}"
+          endDate: "{{ stream_interval.end_time | int }}"
+      record_selector:
+        type: RecordSelector
+        extractor:
+          type: DpathExtractor
+          field_path:
+            - usageEvents
+      paginator:
+        type: DefaultPaginator
+        pagination_strategy:
+          type: PageIncrement
+          page_size: 100
+          start_from_page: 1
+          inject_on_first_request: true
+        page_token_option:
+          type: RequestOption
+          field_name: page
+          inject_into: body_json
+        page_size_option:
+          type: RequestOption
+          field_name: pageSize
+          inject_into: body_json
+    incremental_sync:
+      type: DatetimeBasedCursor
+      cursor_field: timestamp
+      cursor_datetime_formats:
+        - "%ms"
+      datetime_format: "%ms"
+      start_datetime:
+        type: MinMaxDatetime
+        datetime: "{{ config['start_date'] }}"
+        datetime_format: "%Y-%m-%d"
+      end_datetime:
+        type: MinMaxDatetime
+        datetime: "{{ now_utc().strftime('%Y-%m-%dT%H:%M:%S.%fZ') }}"
+        datetime_format: "%Y-%m-%dT%H:%M:%S.%fZ"
+      step: P30D
+      cursor_granularity: PT0.001S
+      lookback_window: P1D
+    schema_loader:
+      type: InlineSchemaLoader
+      schema:
+        $schema: http://json-schema.org/draft-07/schema#
+        type: object
+        additionalProperties: true
+        properties:
+          timestamp:
+            type: string
+          userEmail:
+            type: string
+          model:
+            type: ["string", "null"]
+          kind:
+            type: ["string", "null"]
+          maxMode:
+            type: ["boolean", "null"]
+          isTokenBasedCall:
+            type: ["boolean", "null"]
+          isChargeable:
+            type: ["boolean", "null"]
+          isHeadless:
+            type: ["boolean", "null"]
+          # CRITICAL: number, not integer. Cost in request units can be
+          # fractional (e.g. 1.4).
+          requestsCosts:
+            type: ["number", "null"]
+          # CRITICAL: number, not integer. Cursor Token Rate in cents,
+          # fractional (e.g. 1.18).
+          cursorTokenFee:
+            type: ["number", "null"]
+          # CRITICAL: number, not integer. Cursor returns fractional cents
+          # (e.g. 11.1869). An integer type silently nulls the value.
+          chargedCents:
+            type: ["number", "null"]
+          tokenUsage:
+            type: ["object", "null"]
+            additionalProperties: true
+            properties:
+              inputTokens:
+                type: ["integer", "null"]
+              outputTokens:
+                type: ["integer", "null"]
+              cacheWriteTokens:
+                type: ["integer", "null"]
+              cacheReadTokens:
+                type: ["integer", "null"]
+              # CRITICAL: number, not integer. Fractional cents.
+              totalCents:
+                type: ["number", "null"]
+              discountPercentOff:
+                type: ["number", "null"]
+          serviceAccountId:
+            type: ["string", "null"]
+          serviceAccountName:
+            type: ["string", "null"]
+          cloudAgentId:
+            type: ["string", "null"]
+          automationId:
+            type: ["string", "null"]
+          conversationId:
+            type: ["string", "null"]
+
+spec:
+  type: Spec
+  connection_specification:
+    $schema: http://json-schema.org/draft-07/schema#
+    title: Cursor Teams Source Spec
+    type: object
+    required:
+      - api_key
+      - start_date
+    additionalProperties: true
+    properties:
+      api_key:
+        type: string
+        title: API Key
+        description: >-
+          Cursor Admin API key (starts with crsr_). Create one in the Cursor
+          dashboard under Settings > Admin > API Keys.
+        airbyte_secret: true
+        order: 0
+      start_date:
+        type: string
+        title: Start Date
+        description: >-
+          UTC date to start syncing daily_usage and usage_events from, in
+          YYYY-MM-DD format. Cursor only retains a rolling window of usage
+          data, so dates older than that window return nothing. History
+          accrues forward from the day you install this connector.
+        format: date
+        pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}$
+        examples:
+          - "2026-01-01"
+        order: 1

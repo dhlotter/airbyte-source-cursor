@@ -1,0 +1,39 @@
+data:
+  allowedHosts:
+    hosts:
+      - api.cursor.com
+  registryOverrides:
+    oss:
+      enabled: true
+    cloud:
+      enabled: true
+  remoteRegistries:
+    pypi:
+      enabled: false
+      packageName: airbyte-source-cursor
+  connectorBuildOptions:
+    # Update to the latest source-declarative-manifest base image before submitting.
+    # https://hub.docker.com/r/airbyte/source-declarative-manifest
+    # Use the full sha256-pinned address for reproducible builds.
+    baseImage: docker.io/airbyte/source-declarative-manifest:7.23.6@sha256:9b7d308cba381c3fb2f107af5adc6360a49a19f451738f1beb99f3708a043cd2
+  connectorSubtype: api
+  connectorType: source
+  definitionId: c433e1ea-65da-400f-abe3-28bc1cf35573
+  dockerImageTag: 0.1.0
+  dockerRepository: airbyte/source-cursor
+  githubIssueLabel: source-cursor
+  icon: icon.svg
+  license: MIT
+  name: Cursor
+  releaseDate: "2026-07-23"
+  releaseStage: alpha
+  supportLevel: community
+  documentationUrl: https://docs.airbyte.com/integrations/sources/cursor
+  tags:
+    - cdk:low-code
+    - language:manifest-only
+  externalDocumentationUrls:
+    - title: Cursor Teams Admin API
+      url: https://cursor.com/docs/account/teams/admin-api
+      type: api_reference
+metadataSpecVersion: "1.0"

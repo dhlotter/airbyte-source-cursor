@@ -2,6 +2,10 @@
 
 Airbyte connector for the [Cursor Teams Admin API](https://cursor.com/docs/account/teams/admin-api). It syncs team members, daily usage metrics, per member spend, and granular usage events into your warehouse.
 
+## Status: superseded by the upstream Airbyte PR
+
+This repo is the original prototype, kept for reference and archived. The connector now lives in [airbytehq/airbyte](https://github.com/airbytehq/airbyte) as PR [#82708, New Source: Cursor](https://github.com/airbytehq/airbyte/pull/82708). Use that for the maintained version and for issues or review comments.
+
 ## Why this exists
 
 Cursor's dashboard and Admin API only expose a rolling window of usage and spend data. Once the window rolls past, that data is gone. This connector snapshots the window into permanent warehouse storage on every sync.

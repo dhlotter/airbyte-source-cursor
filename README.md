@@ -43,7 +43,7 @@ The Cursor Admin API is rate limited (20 to 60 requests per minute per team depe
 
 ## Canary
 
-`canary/cost_field_canary.py` calls the live API and fails (exit 1) if any cost field comes back null or missing. A GitHub Actions workflow runs it monthly against the `CURSOR_API_KEY` repository secret. Run it manually with:
+`canary/cost_field_canary.py` calls the live API and fails (exit 1) if any cost field comes back null or missing. It needs a live Cursor Admin key, so there is no scheduled workflow. Run it by hand when you want to check for API drift.
 
 ```bash
 CURSOR_API_KEY=crsr_... python3 canary/cost_field_canary.py
